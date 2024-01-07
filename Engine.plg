@@ -1,0 +1,34 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: Engine - Win32 Release--------------------
+</h3>
+
+Compiling interior/itfdump.asm
+mBox.cc
+mConsoleFunctions.cc
+mMathFn.cc
+mMath_C.cc
+mMatrix.cc
+mPlaneTransformer.cc
+mQuadPatch.cc
+mQuat.cc
+mRandom.cc
+mSolver.cc
+mSplinePatch.cc
+mathTypes.cc
+mathUtils.cc
+mMathAMD.cc
+mMathSSE.cc
+Linking out.VC6.RELEASE/v12_RELEASE.exe
+cp out.VC6.RELEASE/v12_RELEASE* ../example
+
+
+
+<h3>Results</h3>
+v12_RELEASE.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

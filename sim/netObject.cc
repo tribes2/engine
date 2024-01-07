@@ -1,0 +1,249 @@
+//-----------------------------------------------------------------------------
+// V12 Engine
+// 
+// Copyright (c) 2001 GarageGames.Com
+// Portions Copyright (c) 2001 by Sierra Online, Inc.
+//-----------------------------------------------------------------------------
+
+#include "platform/platform.h"
+#include "console/simBase.h"
+#include "core/dnet.h"
+#include "sim/netConnection.h"
+#include "sim/netObject.h"
+#include "console/consoleTypes.h"
+
+IMPLEMENT_CONOBJECT(NetObject);
+
+//----------------------------------------------------------------------------
+NetObject *NetObject::mDirtyList = NULL;
+
+NetObject::NetObject()
+{
+	// netFlags will clear itself to 0
+	mNetIndex = U32(-1);
+   mFirstObjectRef = NULL;
+   mPrevDirtyList = NULL;
+   mNextDirtyList = NULL;
+   mDirtyMaskBits = 0;
+}
+
+NetObject::~NetObject()
+{
+   if(mDirtyMaskBits)
+   {
+      if(mPrevDirtyList)
+         mPrevDirtyList->mNextDirtyList = mNextDirtyList;
+      else
+         mDirtyList = mNextDirtyList;
+      if(mNextDirtyList)
+         mNextDirtyList->mPrevDirtyList = mPrevDirtyList;
+   }
+}
+
+void NetObject::setMaskBits(U32 orMask)
+{
+   AssertFatal(orMask != 0, "Invalid net mask bits set.");
+   AssertFatal(mDirtyMaskBits == 0 || (mPrevDirtyList != NULL || mNextDirtyList != NULL || mDirtyList == this), "Invalid dirty list state.");
+   if(!mDirtyMaskBits)
+   {
+      AssertFatal(mNextDirtyList == NULL && mPrevDirtyList == NULL, "Object with zero mask already in list.");
+      if(mDirtyList)
+      {
+         mNextDirtyList = mDirtyList;
+         mDirtyList->mPrevDirtyList = this;
+      }
+      mDirtyList = this;
+   }
+   mDirtyMaskBits |= orMask;
+   AssertFatal(mDirtyMaskBits == 0 || (mPrevDirtyList != NULL || mNextDirtyList != NULL || mDirtyList == this), "Invalid dirty list state.");
+}
+
+void NetObject::clearMaskBits(U32 orMask)
+{
+   if(isDeleted())
+      return;
+   if(mDirtyMaskBits)
+   {
+      mDirtyMaskBits &= ~orMask;
+      if(!mDirtyMaskBits)
+      {
+         if(mPrevDirtyList)
+            mPrevDirtyList->mNextDirtyList = mNextDirtyList;
+         else
+            mDirtyList = mNextDirtyList;
+         if(mNextDirtyList)
+            mNextDirtyList->mPrevDirtyList = mPrevDirtyList;
+         mNextDirtyList = mPrevDirtyList = NULL;
+      }
+   }
+   
+   for(GhostInfo *walk = mFirstObjectRef; walk; walk = walk->nextObjectRef)
+   {
+      if(walk->updateMask && walk->updateMask == orMask)
+      {
+         walk->updateMask = 0;
+         walk->connection->ghostPushToZero(walk);
+      }
+      else
+         walk->updateMask &= ~orMask;
+   }
+}
+
+void NetObject::collapseDirtyList()
+{
+   Vector<NetObject *> tempV;
+   for(NetObject *t = mDirtyList; t; t = t->mNextDirtyList)
+      tempV.push_back(t);
+
+   for(NetObject *obj = mDirtyList; obj; )
+   {
+      NetObject *next = obj->mNextDirtyList;
+      U32 orMask = obj->mDirtyMaskBits;
+
+      obj->mNextDirtyList = NULL;
+      obj->mPrevDirtyList = NULL;
+      obj->mDirtyMaskBits = 0;
+
+      if(!obj->isDeleted() && orMask)
+      {
+         for(GhostInfo *walk = obj->mFirstObjectRef; walk; walk = walk->nextObjectRef)
+         {
+            if(!walk->updateMask)
+            {
+               walk->updateMask = orMask;
+               walk->connection->ghostPushNonZero(walk);
+            }
+            else
+               walk->updateMask |= orMask;
+         }
+      }
+      obj = next;
+   }
+   mDirtyList = NULL;
+   for(U32 i = 0; i < tempV.size(); i++)
+   {
+      AssertFatal(tempV[i]->mNextDirtyList == NULL && tempV[i]->mPrevDirtyList == NULL && tempV[i]->mDirtyMaskBits == 0, "Error in collapse");
+   }
+}
+
+//-----------------------------------------------------------------------------
+
+ConsoleMethod(NetObject,scopeToClient,void,3,3,"obj.scopeToClient(%client)")
+{
+   argc;
+   NetConnection *conn;
+   if(!Sim::findObject(argv[2], conn))
+   {
+      Con::errorf(ConsoleLogEntry::General, "NetObject::scopeToClient: Couldn't find connection %s", argv[2]);
+      return;
+   }
+   conn->objectLocalScopeAlways((NetObject *) object);
+}
+
+ConsoleMethod(NetObject,clearScopeToClient,void,3,3,"obj.clearScopeToClient(%client)")
+{
+   argc;
+   NetConnection *conn;
+   if(!Sim::findObject(argv[2], conn))
+   {
+      Con::errorf(ConsoleLogEntry::General, "NetObject::clearScopeToClient: Couldn't find connection %s", argv[2]);
+      return;
+   }
+   conn->objectLocalClearAlways((NetObject *) object);
+}
+
+ConsoleMethod(NetObject,setScopeAlways,void,2,2,"obj.scopeAlways();")
+{
+   argc; argv;
+   ((NetObject *) object)->setScopeAlways();
+}
+
+void NetObject::setScopeAlways()
+{
+   if(mNetFlags.test(Ghostable) && !mNetFlags.test(IsGhost))
+   {
+      mNetFlags.set(ScopeAlways);
+      // if it's a ghost always object, add it to the ghost always set
+      // for ClientReps created later.
+   
+      Sim::getGhostAlwaysSet()->addObject(this);
+
+      // add it to all Connections that already exist.
+
+      SimGroup *clientGroup = Sim::getClientGroup();
+      SimGroup::iterator i;
+      for(i = clientGroup->begin(); i != clientGroup->end(); i++)
+      {
+         NetConnection *con = (NetConnection *) (*i);
+         if(con->isGhosting())
+            con->objectInScope(this);
+      }
+   }
+}
+
+bool NetObject::onAdd()
+{
+   if(mNetFlags.test(ScopeAlways))
+      setScopeAlways();
+
+   return Parent::onAdd();
+}
+
+void NetObject::onRemove()
+{
+   while(mFirstObjectRef)
+      mFirstObjectRef->connection->detachObject(mFirstObjectRef);
+
+   Parent::onRemove();
+}
+
+//-----------------------------------------------------------------------------
+
+F32 NetObject::getUpdatePriority(CameraScopeQuery*, U32, S32 updateSkips)
+{
+   return F32(updateSkips) * 0.1;
+
+   //return 0;
+}
+
+U32 NetObject::packUpdate(NetConnection*, U32, BitStream*)
+{
+   return 0;
+}
+
+void NetObject::unpackUpdate(NetConnection*, BitStream*)
+{
+}
+
+void NetObject::onCameraScopeQuery(NetConnection *cr, CameraScopeQuery* /*camInfo*/)
+{
+   // default behavior -
+   // ghost everything that is ghostable
+   
+   for (SimSetIterator obj(Sim::getRootGroup()); *obj; ++obj)
+   {
+		NetObject* nobj = dynamic_cast<NetObject*>(*obj);
+		if (nobj)
+		{
+			// Some objects don't ever want to be ghosted
+			if (!nobj->mNetFlags.test(NetObject::Ghostable))
+				continue;
+         if (!nobj->mNetFlags.test(NetObject::ScopeAlways))
+         {
+            // it's in scope...
+            cr->objectInScope(nobj);
+         }
+      }
+   }
+}
+
+//-----------------------------------------------------------------------------
+
+void NetObject::initPersistFields()
+{
+   Parent::initPersistFields();
+}
+
+void NetObject::consoleInit()
+{
+}
